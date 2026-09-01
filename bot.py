@@ -2192,7 +2192,7 @@ async def rating_callback(update, context):
         await query.message.reply_text(
             "⚠️ Bu safarni allaqachon baholagansiz."
         )
-        async def handle_active_driver(update, context):
+async def handle_active_driver(update, context):
     text = update.message.text
     uid = update.effective_user.id
 
