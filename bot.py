@@ -2426,12 +2426,14 @@ async def admin_show_drivers(update, context):
 
     if not rows:
         await update.message.reply_text(
-            "👥 Haydovchilar mavjud emas."
+            "👥 Haydovchilar mavjud emas.",
+            reply_markup=admin_menu(),
         )
         return
 
     await update.message.reply_text(
-        f"👥 HAYDOVCHILAR: {len(rows)} ta"
+        f"👥 HAYDOVCHILAR: {len(rows)} ta",
+        reply_markup=admin_menu(),
     )
 
     for driver in rows:
@@ -2517,12 +2519,14 @@ async def admin_show_customers(update, context):
 
     if not rows:
         await update.message.reply_text(
-            "👤 Mijozlar mavjud emas."
+            "👤 Mijozlar mavjud emas.",
+            reply_markup=admin_menu(),
         )
         return
 
     await update.message.reply_text(
-        f"👤 BARCHA MIJOZLAR: {len(rows)} ta"
+        f"👤 BARCHA MIJOZLAR: {len(rows)} ta",
+        reply_markup=admin_menu(),
     )
 
     for customer in rows:
@@ -2589,7 +2593,8 @@ async def admin_customer_callback(update, context):
 
     if not user:
         await query.message.reply_text(
-            "⚠️ Mijoz topilmadi."
+            "⚠️ Mijoz topilmadi.",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2629,7 +2634,8 @@ async def admin_customer_callback(update, context):
             f"🏁 Tugagan safar: {stats['finished']}\n"
             f"💰 Jami sarflagan: {stats['spent']:,.0f} so‘m\n"
             f"🚫 Blok: {'Ha' if user['blocked'] else 'Yo‘q'}\n"
-            f"📅 Ro‘yxatdan o‘tgan: {user['created_at'] or '-'}"
+            f"📅 Ro‘yxatdan o‘tgan: {user['created_at'] or '-'}",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2650,8 +2656,9 @@ async def admin_customer_callback(update, context):
 
         if not rows:
             await query.message.reply_text(
-                "📋 Bu mijozda buyurtmalar yo‘q."
-            )
+                "📋 Bu mijozda buyurtmalar yo‘q.",
+            reply_markup=admin_menu(),
+        )
             return
 
         msg = "📋 MIJOZ BUYURTMALARI\n\n"
@@ -2666,7 +2673,9 @@ async def admin_customer_callback(update, context):
                 f"🚖 {order['driver_name'] or '-'}\n\n"
             )
 
-        await query.message.reply_text(msg)
+        await query.message.reply_text(msg,
+            reply_markup=admin_menu(),
+        )
         return
 
     if action == "customer_toggle_block":
@@ -2688,8 +2697,9 @@ async def admin_customer_callback(update, context):
                 pass
 
             await query.message.reply_text(
-                "🚫 Mijoz bloklandi."
-            )
+                "🚫 Mijoz bloklandi.",
+            reply_markup=admin_menu(),
+        )
         else:
             try:
                 await context.bot.send_message(
@@ -2700,8 +2710,9 @@ async def admin_customer_callback(update, context):
                 pass
 
             await query.message.reply_text(
-                "✅ Mijoz blokdan chiqarildi."
-            )
+                "✅ Mijoz blokdan chiqarildi.",
+            reply_markup=admin_menu(),
+        )
 
 
 async def admin_callback(update, context):
@@ -2742,7 +2753,8 @@ async def admin_callback(update, context):
             pass
 
         await query.message.reply_text(
-            "🚫 Haydovchi bloklandi."
+            "🚫 Haydovchi bloklandi.",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2755,8 +2767,9 @@ async def admin_callback(update, context):
 
         if not driver["payment_screenshot"]:
             await query.message.reply_text(
-                "⚠️ To‘lov screenshot mavjud emas."
-            )
+                "⚠️ To‘lov screenshot mavjud emas.",
+            reply_markup=admin_menu(),
+        )
             return
 
         paid_until = now() + timedelta(days=7)
@@ -2782,7 +2795,8 @@ async def admin_callback(update, context):
         )
 
         await query.message.reply_text(
-            "✅ Haydovchi tasdiqlandi."
+            "✅ Haydovchi tasdiqlandi.",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2804,7 +2818,8 @@ async def admin_callback(update, context):
             pass
 
         await query.message.reply_text(
-            "❌ Haydovchi rad etildi."
+            "❌ Haydovchi rad etildi.",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2812,7 +2827,8 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "card"
 
         await query.message.reply_text(
-            "💳 Yangi karta raqamini kiriting:"
+            "💳 Yangi karta raqamini kiriting:",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2820,7 +2836,8 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "card_owner"
 
         await query.message.reply_text(
-            "👤 Karta egasining nomini kiriting:"
+            "👤 Karta egasining nomini kiriting:",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2829,7 +2846,8 @@ async def admin_callback(update, context):
 
         await query.message.reply_text(
             "💰 Yangi haftalik to‘lovni kiriting.\n\n"
-            "Masalan: 10000"
+            "Masalan: 10000",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2837,7 +2855,8 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "price"
 
         await query.message.reply_text(
-            "💰 Yangi standart safar narxini kiriting."
+            "💰 Yangi standart safar narxini kiriting.",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -2847,7 +2866,8 @@ async def admin_callback(update, context):
         await query.message.reply_text(
             "🛣 Yangi marshrut nomini kiriting.\n\n"
             "Masalan:\n"
-            "Jizzax → Forish"
+            "Jizzax → Forish",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -3025,7 +3045,8 @@ async def handle_admin(update, context):
 
         if not rows:
             await update.message.reply_text(
-                "🚕 Buyurtmalar mavjud emas."
+                "🚕 Buyurtmalar mavjud emas.",
+                reply_markup=admin_menu(),
             )
             return
 
@@ -3042,7 +3063,7 @@ async def handle_admin(update, context):
                 f"📌 {order['status']}\n\n"
             )
 
-        await update.message.reply_text(msg)
+        await update.message.reply_text(msg, reply_markup=admin_menu())
         return
 
     if text == "🛣 Marshrutlar":
@@ -3067,6 +3088,7 @@ async def handle_admin(update, context):
                 ]
             ]),
         )
+        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "💰 Narxlar":
@@ -3090,6 +3112,7 @@ async def handle_admin(update, context):
                 ],
             ]),
         )
+        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "💳 To‘lov sozlamalari":
@@ -3119,13 +3142,15 @@ async def handle_admin(update, context):
                 ],
             ]),
         )
+        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "📢 Mijozlarga xabar":
         context.user_data["admin_broadcast"] = "CUSTOMER"
 
         await update.message.reply_text(
-            "📢 Mijozlarga yuboriladigan xabarni yozing:"
+            "📢 Mijozlarga yuboriladigan xabarni yozing:",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -3133,7 +3158,8 @@ async def handle_admin(update, context):
         context.user_data["admin_broadcast"] = "DRIVER"
 
         await update.message.reply_text(
-            "📢 Haydovchilarga yuboriladigan xabarni yozing:"
+            "📢 Haydovchilarga yuboriladigan xabarni yozing:",
+            reply_markup=admin_menu(),
         )
         return
 
@@ -3192,12 +3218,13 @@ async def handle_admin(update, context):
             f"🚕 Jami buyurtmalar: {total_orders}\n"
             f"🏁 Tugagan safarlar: {finished}\n"
             f"❌ Bekor qilingan: {cancelled}\n"
-            f"💰 Tushum: {revenue:,.0f} so‘m"
+            f"💰 Tushum: {revenue:,.0f} so‘m",
+            reply_markup=admin_menu(),
         )
         return
 
     await update.message.reply_text(
-        "👨‍💼 Admin panel",
+        "⚠️ Buyruq topilmadi. Admin menyusidan tanlang.",
         reply_markup=admin_menu(),
     )
 
