@@ -14,11 +14,12 @@ from telegram.ext import (
     CallbackQueryHandler,
     MessageHandler,
     ContextTypes,
+    PicklePersistence,
     filters,
 )
 
-BOT_TOKEN = "8183778325:AAE3PIpxaTHuTt4BEo_EpgCYN4lHGwAtJqs"
-ADMIN_TELEGRAM_ID = 5923818664
+BOT_TOKEN = "BOT_TOKENINGIZNI_KEYIN_QO'YAMIZ"
+ADMIN_TELEGRAM_ID = 123456789
 DB_NAME = "forish_taxi.db"
 
 logging.basicConfig(
@@ -89,6 +90,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS routes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT UNIQUE NOT NULL,
+            price REAL DEFAULT 0,
             created_at TEXT
         )
     """)
@@ -133,6 +135,7 @@ def init_db():
             customer_lat REAL,
             customer_lon REAL,
             status TEXT DEFAULT 'SEARCHING',
+            rejected_driver_ids TEXT DEFAULT '',
             created_at TEXT,
             accepted_at TEXT,
             started_at TEXT,
@@ -157,6 +160,16 @@ def init_db():
             value TEXT
         )
     """)
+
+    # --- Migratsiya: eski bazalarga yangi ustunlarni qo'shish ---
+    for table, column, coltype in [
+        ("routes", "price", "REAL DEFAULT 0"),
+        ("orders", "rejected_driver_ids", "TEXT DEFAULT ''"),
+    ]:
+        try:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+        except sqlite3.OperationalError:
+            pass  # ustun allaqachon mavjud
 
     defaults = {
         "weekly_driver_fee": "10000",
@@ -317,6 +330,13 @@ def get_routes():
     )
 
 
+def route_price(route):
+    """Marshrutning o'z narxi bo'lsa o'shani, bo'lmasa standart narxni qaytaradi."""
+    if route and route["price"]:
+        return float(route["price"])
+    return float(setting("default_price", "10000"))
+
+
 def route_parts(route):
     name = route["name"]
     if "→" in name:
@@ -365,6 +385,31 @@ def driver_is_active(driver):
         return False
 
     return True
+
+
+# --- Rad etgan haydovchilarni kuzatish (bir xil buyurtma qayta yuborilmasligi uchun) ---
+
+def get_rejected_drivers(order):
+    raw = order["rejected_driver_ids"] or ""
+    return set(int(x) for x in raw.split(",") if x)
+
+
+def add_rejected_driver(order_id, driver_id):
+    order = execute(
+        "SELECT rejected_driver_ids FROM orders WHERE id=?",
+        (order_id,),
+        fetchone=True,
+    )
+    if not order:
+        return
+
+    ids = set(int(x) for x in (order["rejected_driver_ids"] or "").split(",") if x)
+    ids.add(driver_id)
+
+    execute(
+        "UPDATE orders SET rejected_driver_ids=? WHERE id=?",
+        (",".join(str(i) for i in ids), order_id),
+    )
 
 
 def main_menu():
@@ -1202,14 +1247,23 @@ async def send_waiting_orders_to_driver(driver_id, context):
         AND passengers<=?
         AND customer_side=?
         ORDER BY id ASC
-        LIMIT 5
+        LIMIT 10
     """, (
         driver["route_id"],
         driver["available_seats"],
         driver["current_side"],
     ), fetch=True)
 
+    sent = 0
+
     for order in rows:
+        if sent >= 5:
+            break
+
+        # Bu haydovchi ushbu buyurtmani avval rad etgan bo'lsa, qayta yubormaymiz
+        if driver_id in get_rejected_drivers(order):
+            continue
+
         changed = execute("""
             UPDATE orders
             SET
@@ -1222,6 +1276,8 @@ async def send_waiting_orders_to_driver(driver_id, context):
 
         if not changed:
             continue
+
+        sent += 1
 
         keyboard = InlineKeyboardMarkup([
             [
@@ -1319,12 +1375,6 @@ async def accept_order_callback(update, context):
 
     driver = get_driver(driver_id)
 
-    if not driver_is_active(driver):
-        await query.message.reply_text(
-            "🚫 Haydovchilik hisobingiz faol emas."
-        )
-        return
-
     order = execute("""
         SELECT *
         FROM orders
@@ -1339,6 +1389,35 @@ async def accept_order_callback(update, context):
         )
         return
 
+    # TUZATISH: haydovchi endi faol bo'lmasa, buyurtmani "osilib qolgan"
+    # holatda qoldirmaymiz — qayta qidiruvga chiqaramiz va mijozga xabar beramiz.
+    if not driver_is_active(driver):
+        execute("""
+            UPDATE orders
+            SET status='SEARCHING', driver_id=NULL
+            WHERE id=?
+            AND driver_id=?
+            AND status='REQUESTED'
+        """, (order_id, driver_id))
+
+        await query.message.reply_text(
+            "🚫 Haydovchilik hisobingiz faol emas."
+        )
+
+        try:
+            await context.bot.send_message(
+                chat_id=order["customer_id"],
+                text=(
+                    "⚠️ Tanlangan haydovchi hozir mavjud emas.\n\n"
+                    "Boshqa haydovchi qidirilmoqda."
+                ),
+            )
+        except Exception:
+            pass
+
+        await redistribute_order(order_id, context)
+        return
+
     if driver["available_seats"] < order["passengers"]:
         execute("""
             UPDATE orders
@@ -1349,6 +1428,8 @@ async def accept_order_callback(update, context):
         await query.message.reply_text(
             "⚠️ Sizda yetarli bo‘sh o‘rin qolmagan."
         )
+
+        await redistribute_order(order_id, context)
         return
 
     changed = execute("""
@@ -1448,6 +1529,9 @@ async def reject_order_callback(update, context):
         AND status='REQUESTED'
     """, (order_id, driver_id))
 
+    # Bu haydovchi rad etganini eslab qolamiz — qayta shu buyurtma yuborilmasin
+    add_rejected_driver(order_id, driver_id)
+
     await query.message.reply_text(
         "❌ Buyurtma rad etildi."
     )
@@ -1477,6 +1561,8 @@ async def redistribute_order(order_id, context):
     if not order or order["status"] != "SEARCHING":
         return
 
+    rejected = get_rejected_drivers(order)
+
     drivers = execute("""
         SELECT *
         FROM drivers
@@ -1493,6 +1579,9 @@ async def redistribute_order(order_id, context):
     ), fetch=True)
 
     for driver in drivers:
+        if driver["telegram_id"] in rejected:
+            continue
+
         changed = execute("""
             UPDATE orders
             SET
@@ -1537,6 +1626,7 @@ async def redistribute_order(order_id, context):
                 SET driver_id=NULL,status='SEARCHING'
                 WHERE id=? AND driver_id=?
             """, (order_id, driver["telegram_id"]))
+            continue
         break
 
 
@@ -1770,9 +1860,12 @@ async def customer_from_callback(update, context):
 
     context.user_data["step"] = "order_passengers"
 
+    price = route_price(route)
+
     await query.message.reply_text(
         f"📍 Ketish joyi: {from_place}\n"
-        f"🏁 Borish joyi: {to_place}\n\n"
+        f"🏁 Borish joyi: {to_place}\n"
+        f"💰 Narx: {price:,.0f} so‘m\n\n"
         "👥 Necha kishi?",
         reply_markup=InlineKeyboardMarkup([
             [
@@ -1789,11 +1882,6 @@ async def customer_from_callback(update, context):
             ],
         ]),
     )
-
-
-async def customer_to_callback(update, context):
-    query = update.callback_query
-    await query.answer()
 
 
 async def customer_passengers_callback(update, context):
@@ -1834,7 +1922,8 @@ async def create_customer_order(update, context):
         )
         return
 
-    price = float(setting("default_price", "10000"))
+    route = get_route(order_data["route_id"])
+    price = route_price(route)
 
     execute("""
         INSERT INTO orders(
@@ -1895,6 +1984,8 @@ async def find_drivers_for_order(order_id, context):
     if not order:
         return
 
+    rejected = get_rejected_drivers(order)
+
     drivers = execute("""
         SELECT *
         FROM drivers
@@ -1909,6 +2000,8 @@ async def find_drivers_for_order(order_id, context):
         order["passengers"],
         order["customer_side"],
     ), fetch=True)
+
+    drivers = [d for d in drivers if d["telegram_id"] not in rejected]
 
     if not drivers:
         await context.bot.send_message(
@@ -1973,6 +2066,12 @@ async def choose_driver_callback(update, context):
     if not order:
         await query.message.reply_text(
             "⚠️ Bu buyurtma endi mavjud emas."
+        )
+        return
+
+    if driver_id in get_rejected_drivers(order):
+        await query.message.reply_text(
+            "⚠️ Bu haydovchi ushbu buyurtmani avval rad etgan."
         )
         return
 
@@ -2192,6 +2291,8 @@ async def rating_callback(update, context):
         await query.message.reply_text(
             "⚠️ Bu safarni allaqachon baholagansiz."
         )
+
+
 async def handle_active_driver(update, context):
     text = update.message.text
     uid = update.effective_user.id
@@ -2426,14 +2527,12 @@ async def admin_show_drivers(update, context):
 
     if not rows:
         await update.message.reply_text(
-            "👥 Haydovchilar mavjud emas.",
-            reply_markup=admin_menu(),
+            "👥 Haydovchilar mavjud emas."
         )
         return
 
     await update.message.reply_text(
-        f"👥 HAYDOVCHILAR: {len(rows)} ta",
-        reply_markup=admin_menu(),
+        f"👥 HAYDOVCHILAR: {len(rows)} ta"
     )
 
     for driver in rows:
@@ -2519,14 +2618,12 @@ async def admin_show_customers(update, context):
 
     if not rows:
         await update.message.reply_text(
-            "👤 Mijozlar mavjud emas.",
-            reply_markup=admin_menu(),
+            "👤 Mijozlar mavjud emas."
         )
         return
 
     await update.message.reply_text(
-        f"👤 BARCHA MIJOZLAR: {len(rows)} ta",
-        reply_markup=admin_menu(),
+        f"👤 BARCHA MIJOZLAR: {len(rows)} ta"
     )
 
     for customer in rows:
@@ -2593,8 +2690,7 @@ async def admin_customer_callback(update, context):
 
     if not user:
         await query.message.reply_text(
-            "⚠️ Mijoz topilmadi.",
-            reply_markup=admin_menu(),
+            "⚠️ Mijoz topilmadi."
         )
         return
 
@@ -2634,8 +2730,7 @@ async def admin_customer_callback(update, context):
             f"🏁 Tugagan safar: {stats['finished']}\n"
             f"💰 Jami sarflagan: {stats['spent']:,.0f} so‘m\n"
             f"🚫 Blok: {'Ha' if user['blocked'] else 'Yo‘q'}\n"
-            f"📅 Ro‘yxatdan o‘tgan: {user['created_at'] or '-'}",
-            reply_markup=admin_menu(),
+            f"📅 Ro‘yxatdan o‘tgan: {user['created_at'] or '-'}"
         )
         return
 
@@ -2656,9 +2751,8 @@ async def admin_customer_callback(update, context):
 
         if not rows:
             await query.message.reply_text(
-                "📋 Bu mijozda buyurtmalar yo‘q.",
-            reply_markup=admin_menu(),
-        )
+                "📋 Bu mijozda buyurtmalar yo‘q."
+            )
             return
 
         msg = "📋 MIJOZ BUYURTMALARI\n\n"
@@ -2673,9 +2767,7 @@ async def admin_customer_callback(update, context):
                 f"🚖 {order['driver_name'] or '-'}\n\n"
             )
 
-        await query.message.reply_text(msg,
-            reply_markup=admin_menu(),
-        )
+        await query.message.reply_text(msg)
         return
 
     if action == "customer_toggle_block":
@@ -2697,9 +2789,8 @@ async def admin_customer_callback(update, context):
                 pass
 
             await query.message.reply_text(
-                "🚫 Mijoz bloklandi.",
-            reply_markup=admin_menu(),
-        )
+                "🚫 Mijoz bloklandi."
+            )
         else:
             try:
                 await context.bot.send_message(
@@ -2710,9 +2801,8 @@ async def admin_customer_callback(update, context):
                 pass
 
             await query.message.reply_text(
-                "✅ Mijoz blokdan chiqarildi.",
-            reply_markup=admin_menu(),
-        )
+                "✅ Mijoz blokdan chiqarildi."
+            )
 
 
 async def admin_callback(update, context):
@@ -2753,8 +2843,7 @@ async def admin_callback(update, context):
             pass
 
         await query.message.reply_text(
-            "🚫 Haydovchi bloklandi.",
-            reply_markup=admin_menu(),
+            "🚫 Haydovchi bloklandi."
         )
         return
 
@@ -2767,9 +2856,8 @@ async def admin_callback(update, context):
 
         if not driver["payment_screenshot"]:
             await query.message.reply_text(
-                "⚠️ To‘lov screenshot mavjud emas.",
-            reply_markup=admin_menu(),
-        )
+                "⚠️ To‘lov screenshot mavjud emas."
+            )
             return
 
         paid_until = now() + timedelta(days=7)
@@ -2795,8 +2883,7 @@ async def admin_callback(update, context):
         )
 
         await query.message.reply_text(
-            "✅ Haydovchi tasdiqlandi.",
-            reply_markup=admin_menu(),
+            "✅ Haydovchi tasdiqlandi."
         )
         return
 
@@ -2818,8 +2905,7 @@ async def admin_callback(update, context):
             pass
 
         await query.message.reply_text(
-            "❌ Haydovchi rad etildi.",
-            reply_markup=admin_menu(),
+            "❌ Haydovchi rad etildi."
         )
         return
 
@@ -2827,8 +2913,7 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "card"
 
         await query.message.reply_text(
-            "💳 Yangi karta raqamini kiriting:",
-            reply_markup=admin_menu(),
+            "💳 Yangi karta raqamini kiriting:"
         )
         return
 
@@ -2836,8 +2921,7 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "card_owner"
 
         await query.message.reply_text(
-            "👤 Karta egasining nomini kiriting:",
-            reply_markup=admin_menu(),
+            "👤 Karta egasining nomini kiriting:"
         )
         return
 
@@ -2846,8 +2930,7 @@ async def admin_callback(update, context):
 
         await query.message.reply_text(
             "💰 Yangi haftalik to‘lovni kiriting.\n\n"
-            "Masalan: 10000",
-            reply_markup=admin_menu(),
+            "Masalan: 10000"
         )
         return
 
@@ -2855,8 +2938,7 @@ async def admin_callback(update, context):
         context.user_data["admin_step"] = "price"
 
         await query.message.reply_text(
-            "💰 Yangi standart safar narxini kiriting.",
-            reply_markup=admin_menu(),
+            "💰 Yangi standart safar narxini kiriting."
         )
         return
 
@@ -2866,8 +2948,26 @@ async def admin_callback(update, context):
         await query.message.reply_text(
             "🛣 Yangi marshrut nomini kiriting.\n\n"
             "Masalan:\n"
-            "Jizzax → Forish",
-            reply_markup=admin_menu(),
+            "Jizzax → Forish"
+        )
+        return
+
+    if data.startswith("route_edit_price:"):
+        route_id = int(data.split(":", 1)[1])
+        route = get_route(route_id)
+
+        if not route:
+            await query.message.reply_text(
+                "⚠️ Marshrut topilmadi."
+            )
+            return
+
+        context.user_data["admin_step"] = "route_price_edit"
+        context.user_data["edit_route_id"] = route_id
+
+        await query.message.reply_text(
+            f"💰 «{route['name']}» uchun yangi narxni kiriting.\n\n"
+            f"Hozirgi narx: {route['price']:,.0f} so‘m"
         )
         return
 
@@ -2960,24 +3060,97 @@ async def handle_admin(update, context):
                 )
                 return
 
-            try:
-                execute("""
-                    INSERT INTO routes(name,created_at)
-                    VALUES(?,?)
-                """, (route_name, iso(now())))
+            existing = execute(
+                "SELECT id FROM routes WHERE name=?",
+                (route_name,),
+                fetchone=True,
+            )
 
-                context.user_data.pop("admin_step", None)
-
+            if existing:
                 await update.message.reply_text(
-                    "✅ Yangi marshrut qo‘shildi.",
+                    "⚠️ Bunday marshrut allaqachon mavjud."
+                )
+                context.user_data.pop("admin_step", None)
+                return
+
+            context.user_data["new_route_name"] = route_name
+            context.user_data["admin_step"] = "route_price"
+
+            await update.message.reply_text(
+                "💰 Ushbu marshrut uchun narxni kiriting.\n\n"
+                "Masalan: 15000"
+            )
+            return
+
+        if admin_step == "route_price":
+            try:
+                price = float(text.replace(" ", "").replace(",", ""))
+                if price < 0:
+                    raise ValueError
+            except Exception:
+                await update.message.reply_text(
+                    "⚠️ Narxni raqam bilan kiriting."
+                )
+                return
+
+            route_name = context.user_data.get("new_route_name")
+
+            if not route_name:
+                context.user_data.pop("admin_step", None)
+                await update.message.reply_text(
+                    "⚠️ Xatolik. Qaytadan urinib ko‘ring.",
                     reply_markup=admin_menu(),
                 )
+                return
 
+            try:
+                execute("""
+                    INSERT INTO routes(name,price,created_at)
+                    VALUES(?,?,?)
+                """, (route_name, price, iso(now())))
+
+                await update.message.reply_text(
+                    f"✅ Yangi marshrut qo‘shildi.\n💰 Narx: {price:,.0f} so‘m",
+                    reply_markup=admin_menu(),
+                )
             except sqlite3.IntegrityError:
                 await update.message.reply_text(
                     "⚠️ Bunday marshrut allaqachon mavjud."
                 )
+            finally:
+                context.user_data.pop("admin_step", None)
+                context.user_data.pop("new_route_name", None)
+            return
 
+        if admin_step == "route_price_edit":
+            try:
+                price = float(text.replace(" ", "").replace(",", ""))
+                if price < 0:
+                    raise ValueError
+            except Exception:
+                await update.message.reply_text(
+                    "⚠️ Narxni raqam bilan kiriting."
+                )
+                return
+
+            route_id = context.user_data.get("edit_route_id")
+
+            if not route_id:
+                context.user_data.pop("admin_step", None)
+                return
+
+            execute(
+                "UPDATE routes SET price=? WHERE id=?",
+                (price, route_id),
+            )
+
+            context.user_data.pop("admin_step", None)
+            context.user_data.pop("edit_route_id", None)
+
+            await update.message.reply_text(
+                f"✅ Narx yangilandi: {price:,.0f} so‘m",
+                reply_markup=admin_menu(),
+            )
             return
 
     broadcast = context.user_data.get("admin_broadcast")
@@ -3045,8 +3218,7 @@ async def handle_admin(update, context):
 
         if not rows:
             await update.message.reply_text(
-                "🚕 Buyurtmalar mavjud emas.",
-                reply_markup=admin_menu(),
+                "🚕 Buyurtmalar mavjud emas."
             )
             return
 
@@ -3063,22 +3235,48 @@ async def handle_admin(update, context):
                 f"📌 {order['status']}\n\n"
             )
 
-        await update.message.reply_text(msg, reply_markup=admin_menu())
+        await update.message.reply_text(msg)
         return
 
     if text == "🛣 Marshrutlar":
         routes = get_routes()
 
         if not routes:
-            msg = "🛣 MARSHRUTLAR\n\nHozircha marshrut yo‘q."
-        else:
-            msg = "🛣 MARSHRUTLAR\n\n"
-
-            for route in routes:
-                msg += f"🆔 {route['id']}. {route['name']}\n"
+            await update.message.reply_text(
+                "🛣 MARSHRUTLAR\n\nHozircha marshrut yo‘q.",
+                reply_markup=InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton(
+                            "➕ Marshrut qo‘shish",
+                            callback_data="route_add",
+                        )
+                    ]
+                ]),
+            )
+            return
 
         await update.message.reply_text(
-            msg,
+            f"🛣 MARSHRUTLAR: {len(routes)} ta"
+        )
+
+        for route in routes:
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton(
+                        "✏️ Narxni o‘zgartirish",
+                        callback_data=f"route_edit_price:{route['id']}",
+                    )
+                ]
+            ])
+
+            await update.message.reply_text(
+                f"🆔 {route['id']}. {route['name']}\n"
+                f"💰 Narx: {route['price']:,.0f} so‘m",
+                reply_markup=keyboard,
+            )
+
+        await update.message.reply_text(
+            "➕ Yangi marshrut qo‘shish:",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
@@ -3088,19 +3286,21 @@ async def handle_admin(update, context):
                 ]
             ]),
         )
-        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "💰 Narxlar":
         await update.message.reply_text(
             "💰 NARXLAR\n\n"
-            f"🚕 Standart safar: {setting('default_price')} so‘m\n"
+            f"🚕 Standart safar (marshrut narxi belgilanmagan bo‘lsa): "
+            f"{setting('default_price')} so‘m\n"
             f"🚖 Haftalik haydovchi to‘lovi: "
-            f"{setting('weekly_driver_fee')} so‘m",
+            f"{setting('weekly_driver_fee')} so‘m\n\n"
+            "ℹ️ Har bir marshrutning o‘z narxini "
+            "«🛣 Marshrutlar» bo‘limidan o‘zgartirishingiz mumkin.",
             reply_markup=InlineKeyboardMarkup([
                 [
                     InlineKeyboardButton(
-                        "✏️ Safar narxi",
+                        "✏️ Standart narx",
                         callback_data="set_price",
                     )
                 ],
@@ -3112,7 +3312,6 @@ async def handle_admin(update, context):
                 ],
             ]),
         )
-        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "💳 To‘lov sozlamalari":
@@ -3142,15 +3341,13 @@ async def handle_admin(update, context):
                 ],
             ]),
         )
-        await update.message.reply_text("👨‍💼 Menyu", reply_markup=admin_menu())
         return
 
     if text == "📢 Mijozlarga xabar":
         context.user_data["admin_broadcast"] = "CUSTOMER"
 
         await update.message.reply_text(
-            "📢 Mijozlarga yuboriladigan xabarni yozing:",
-            reply_markup=admin_menu(),
+            "📢 Mijozlarga yuboriladigan xabarni yozing:"
         )
         return
 
@@ -3158,8 +3355,7 @@ async def handle_admin(update, context):
         context.user_data["admin_broadcast"] = "DRIVER"
 
         await update.message.reply_text(
-            "📢 Haydovchilarga yuboriladigan xabarni yozing:",
-            reply_markup=admin_menu(),
+            "📢 Haydovchilarga yuboriladigan xabarni yozing:"
         )
         return
 
@@ -3218,13 +3414,12 @@ async def handle_admin(update, context):
             f"🚕 Jami buyurtmalar: {total_orders}\n"
             f"🏁 Tugagan safarlar: {finished}\n"
             f"❌ Bekor qilingan: {cancelled}\n"
-            f"💰 Tushum: {revenue:,.0f} so‘m",
-            reply_markup=admin_menu(),
+            f"💰 Tushum: {revenue:,.0f} so‘m"
         )
         return
 
     await update.message.reply_text(
-        "⚠️ Buyruq topilmadi. Admin menyusidan tanlang.",
+        "👨‍💼 Admin panel",
         reply_markup=admin_menu(),
     )
 
@@ -3359,10 +3554,6 @@ async def callback_router(update, context):
         await customer_from_callback(update, context)
         return
 
-    if data.startswith("order_to:"):
-        await customer_to_callback(update, context)
-        return
-
     if data.startswith("order_passengers:"):
         await customer_passengers_callback(update, context)
         return
@@ -3406,6 +3597,7 @@ async def callback_router(update, context):
         or data.startswith("driver_block:")
         or data.startswith("set_")
         or data == "route_add"
+        or data.startswith("route_edit_price:")
     ):
         await admin_callback(update, context)
         return
@@ -3449,10 +3641,13 @@ async def check_expired_drivers(context):
 def main():
     init_db()
 
+    persistence = PicklePersistence(filepath="forish_taxi_persistence.pickle")
+
     application = (
         Application
         .builder()
         .token(BOT_TOKEN)
+        .persistence(persistence)
         .build()
     )
 
@@ -3474,16 +3669,13 @@ def main():
     if application.job_queue:
         application.job_queue.run_repeating(
             check_expired_drivers,
-            interval=600,
+            interval=300,
             first=10,
-        )
-
-    logger.info("FORISH TAXI BOT ISHGA TUSHDI")
+        logger.info("FORISH TAXI BOT ISHGA TUSHDI")
 
     application.run_polling(
         drop_pending_updates=True
     )
-
 
 if __name__ == "__main__":
     main()
