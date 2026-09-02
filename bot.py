@@ -466,12 +466,17 @@ def admin_menu():
 def location_keyboard():
     return ReplyKeyboardMarkup(
         [
-            ["📍 Joylashuvni yuborish"],
+            [
+                {
+                    "text": "📍 Joylashuvni yuborish",
+                    "request_location": True,
+                }
+            ],
             ["🏠 Bosh menyu"],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
-    )
+            )
 
 
 def contact_keyboard():
