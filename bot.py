@@ -3671,11 +3671,14 @@ def main():
             check_expired_drivers,
             interval=300,
             first=10,
-        logger.info("FORISH TAXI BOT ISHGA TUSHDI")
+        )
+
+    logger.info("FORISH TAXI BOT ISHGA TUSHDI")
 
     application.run_polling(
         drop_pending_updates=True
     )
+
 
 if __name__ == "__main__":
     main()
