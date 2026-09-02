@@ -18,8 +18,10 @@ from telegram.ext import (
     filters,
 )
 
-BOT_TOKEN = "BOT_TOKENINGIZNI_KEYIN_QO'YAMIZ"
-ADMIN_TELEGRAM_ID = 123456789
+import os
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+ADMIN_TELEGRAM_ID = int(os.environ.get("ADMIN_TELEGRAM_ID", "0"))
 DB_NAME = "forish_taxi.db"
 
 logging.basicConfig(
